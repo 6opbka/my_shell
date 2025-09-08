@@ -1,3 +1,7 @@
+
+#define _POSIX_C_SOURCE 200809L
+
+
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -10,18 +14,27 @@
 #include <pwd.h>
 #include <grp.h>
 #include <time.h>
+#include <fcntl.h>
+#include <limits.h>
 
 
 #define MAX_LINE_LENGTH 256
 #define PATH_MAX 4096
+
+char* home_path = NULL;
 
 void ls(char** args);
 void cd(char** args);
 void pwd(char** args);
 void foo2_func(char** args);
 void exit_cmd(char** args);
+void process_prc(char** args);
+void process_redirection(char** cmd);
 
+int redirect_type = 0;
+int saved_stdout = -1;
 
+char* g_last_line = NULL;
 
 struct command{
     const char* name;
@@ -45,11 +58,11 @@ int cmpstr(const void* a, const void* b){
 
 char** read_input(){
     ssize_t ret;
-    char* line = NULL;
+    
     size_t len = 0;
 
     printf("> ");
-    ret = getline(&line,&len, stdin);
+    ret = getline(&g_last_line,&len, stdin);
     if(!ret){
         printf("Err reading command\n");
     }
@@ -58,12 +71,12 @@ char** read_input(){
     char **out = malloc(bufsize * sizeof(char*));
     if (!out) {
         perror("malloc");
-        free(line);
+        free(g_last_line);
         return NULL;
     }
     
 
-    char* token = strtok(line," \n");
+    char* token = strtok(g_last_line," \n");
     // printf("command> %s\n",token);
 
     int pos = 0;
@@ -76,7 +89,7 @@ char** read_input(){
             out = realloc(out,bufsize*sizeof(char*));
             if(!out){
                 perror("realloc err\n");
-                free(line);
+                free(g_last_line);
                 return NULL;
             }
         }
@@ -91,13 +104,19 @@ char** read_input(){
     return out;
 }
 
+
+
 void process_prc(char** args){
+    
+
     pid_t pid = fork();
     if(pid<0){
         perror("fork\n");
         exit(EXIT_FAILURE);
     }
     else if(pid==0){
+        // Redirection logic before exe
+
         execvp(args[0],args);
 
         perror("execvp\n");
@@ -115,21 +134,113 @@ void process_prc(char** args){
 
 }
 
-void process_cmd(char** cmd){
-    size_t i = 0;
-    i = 0;
-    while(command_table[i].name!=NULL){
-        if(strcmp(cmd[0],command_table[i].name) == 0){
-            // printf("calling %s\n", command_table[i].name);
-            command_table[i].func(cmd+1);
+void process_redirection(char** args) {
+    char* redir_filename = NULL;
+    int i;
+
+    for (i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], ">") == 0) {
+            redirect_type = 1;
+            redir_filename = args[i+1];
+            args[i] = NULL;  // Truncate command at redirection
+            break;
         }
-        i++;
+        else if (strcmp(args[i], "<") == 0) {
+            redirect_type = 2;
+            redir_filename = args[i+1];
+            args[i] = NULL;  // Truncate command at redirection
+            break;
+        }
+        else if (strcmp(args[i],">>") == 0){
+            redirect_type = 3;
+            redir_filename = args[i+1];
+            args[i] = NULL;
+            break;
+        }
+    }
+    if(redirect_type == 0 || redir_filename == NULL) return;
+
+    printf("filename: %s\n", redir_filename);
+    printf("redirection type: %d\n", redirect_type);
+    int fd = -1;
+
+    switch (redirect_type)
+    {
+    case 1:
+        fd = open(redir_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            perror("open");
+            return;
+        }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        break;
+
+    case 2:
+        fd = open(redir_filename, O_RDONLY);
+        if (fd < 0) {
+            perror("open");
+            return;
+        }
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+        break;
+    case 3:
+        fd = open(redir_filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) {
+            perror("open");
+            return;
+        }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        break;
+    default:
+        break;
+    }   
+}
+
+
+void process_cmd(char** cmd) {
+    // Save original file descriptors
+    int saved_stdout = dup(STDOUT_FILENO);
+    int saved_stdin = dup(STDIN_FILENO);
+    if (saved_stdout == -1 || saved_stdin == -1) {
+        perror("dup");
+        return;
     }
 
-    // process_prc(cmd);
+    // Process redirection (this modifies cmd array)
+    redirect_type = 0;
+    process_redirection(cmd);
+
+    // Handle built-in commands
+    int is_builtin = 0;
+    for (size_t i = 0; command_table[i].name != NULL; i++) {
+        if (cmd[0] && strcmp(cmd[0], command_table[i].name) == 0) {
+            command_table[i].func(cmd + 1);  // Execute with redirection active
+            is_builtin = 1;
+            break;
+        }
+    }
+
+    // Handle external commands
+    if (!is_builtin && cmd[0]) {
+        process_prc(cmd);
+    }
+
+    // Restore original file descriptors if redirection occurred
+    if (redirect_type != 0) {
+        if (dup2(saved_stdout, STDOUT_FILENO) == -1) perror("dup2 stdout");
+        if (dup2(saved_stdin, STDIN_FILENO) == -1) perror("dup2 stdin");
+    }
+    close(saved_stdout);
+    close(saved_stdin);
+    if(g_last_line) free(g_last_line); //freeing the line buffer.
 }
 
 void print_dir(char** dirs, size_t size, unsigned int print_vert) {
+
+    
 
     if(print_vert){
         for(size_t i = 0; i<size; i++){
@@ -139,9 +250,13 @@ void print_dir(char** dirs, size_t size, unsigned int print_vert) {
     }
 
     struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) {
-        perror("ioctl");
-        return;
+    if (isatty(STDOUT_FILENO)) {
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) {
+            perror("ioctl");
+            return;
+    }
+    } else {
+        w.ws_col = 80;  // default width for non-terminals (like redirected files)
     }
 
     size_t maxlen = 0;
@@ -335,13 +450,14 @@ void ls(char** args){
         qsort(dirs_to_show, dir_id, sizeof(char*), cmpstr);
 
         print_dir(dirs_to_show, dir_id,modes[0].value);
+        fflush(stdout);
 
         // Free allocated strings
         for(unsigned int j=0; j<dir_id; j++) {
             free(dirs_to_show[j]);
         }
         free(dirs_to_show);
-
+        
         closedir(d);
     } else {
         printf("no such directory\n");
@@ -351,7 +467,14 @@ void ls(char** args){
 }
 
 void cd(char** args){
-    int result = chdir(args[0]);
+    int result = 0;
+    if(!args[0]){
+        result = chdir(home_path);
+    }
+    else{
+        result = chdir(args[0]);
+    }
+    
     if (result != 0) {
         perror("cd");
     }
@@ -359,7 +482,10 @@ void cd(char** args){
 }
 
 void pwd(char** args){
-
+    char buf[PATH_MAX+1];
+    if(getcwd(buf,PATH_MAX+1)!=NULL){
+        printf("%s\n",buf);
+    }
 }
 
 void foo2_func(char** args){
@@ -371,17 +497,27 @@ void exit_cmd(char** args){
     exit(0);
 }
 
+void init(){
+    home_path = getenv("HOME");
+    if(home_path&&home_path[0]!='\0'){
+        printf("home is %s\n", home_path);
+    }
+}
 
 
 
-int main(){
+
+int main() {
+    init();
     
-    
-    while(1){
+    while (1) {
         char** cmd = read_input();
+        if (!cmd) continue;  // Skip if read failed
+        
         process_cmd(cmd);
-        usleep(1);
+     
+        
+        usleep(1000);  // Small delay to prevent CPU overuse
     }
     return 0;
-
 }
