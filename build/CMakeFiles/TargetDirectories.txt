@@ -1,3 +1,0 @@
-/home/egor/projects/my_shell/build/CMakeFiles/myshell.dir
-/home/egor/projects/my_shell/build/CMakeFiles/edit_cache.dir
-/home/egor/projects/my_shell/build/CMakeFiles/rebuild_cache.dir

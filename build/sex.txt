@@ -1,4 +1,0 @@
-sex2
-Child exited with status 0
-sex3
-Child exited with status 0

@@ -1,1 +1,0 @@
-/usr/bin/cc  -Wall -Wextra -g CMakeFiles/myshell.dir/main.c.o -o myshell 
